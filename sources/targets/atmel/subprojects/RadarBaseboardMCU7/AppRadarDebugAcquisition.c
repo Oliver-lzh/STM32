@@ -163,6 +163,7 @@ sr_t AppRadarDebugAcquisition_stop(void)
     if (!m_isConstructed || (m_radar == NULL))
     {
         m_isRunning = false;
+        m_startAttempted = false;
         return E_SUCCESS;
     }
 
@@ -175,6 +176,7 @@ sr_t AppRadarDebugAcquisition_stop(void)
     if (ret == E_SUCCESS)
     {
         m_isRunning = false;
+        m_startAttempted = false;
     }
 
     return ret;
