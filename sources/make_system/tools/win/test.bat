@@ -1,0 +1,1 @@
+@IF NOT EXIST "%2" exit /b 1

@@ -1,0 +1,13 @@
+build-*/
+*.bin
+*.elf
+*.hex
+*.map
+*.o
+*.d
+.vs/
+.vibeskills/
+outputs/
+*.lss
+*.sym
+NUL
