@@ -4616,6 +4616,12 @@
     <Compile Include="AppRadarProbe.h">
       <SubType>compile</SubType>
     </Compile>
+    <Compile Include="AppRangeFft.c">
+      <SubType>compile</SubType>
+    </Compile>
+    <Compile Include="AppRangeFft.h">
+      <SubType>compile</SubType>
+    </Compile>
     <Compile Include="BoardOutput.c">
       <SubType>compile</SubType>
     </Compile>

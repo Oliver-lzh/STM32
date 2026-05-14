@@ -29,6 +29,7 @@
 
 #include "AppRadarDebugAcquisition.h"
 #include "AppRadarProbe.h"
+#include "AppRangeFft.h"
 #include "BoardOutput.h"
 
 #include <PlatformInterfaces.h>
@@ -120,6 +121,12 @@ static void Board_dataCallback(void *arg, uint8_t *payload, uint32_t count, uint
     LedSequence_setStatus(LED_STATUS_TRANSFERRING);
 
     AppRadarProbe_onFrame(payload, count, channel, timestamp);
+
+    /* Range FFT processing is deferred to Board_run() to keep this callback short. */
+    if (BoardOutput_getMode() == BOARD_OUTPUT_MODE_DEBUG_TEXT)
+    {
+        AppRangeFft_submitFrame(payload, count, channel, timestamp);
+    }
 
     const sr_t ret = BoardOutput_onFrame(payload, count, channel, timestamp);
     if (ret != E_SUCCESS)
@@ -499,6 +506,7 @@ void Board_run(void)
     //新增部分
     BoardOutput_run();
     AppRadarDebugAcquisition_run();
+    AppRangeFft_run();
    
 
 

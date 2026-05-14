@@ -123,6 +123,7 @@ CFLAGS +=  \
 #   EXT_BOARD  Optional extension board in use, see boards/board.h for a list.
 CPPFLAGS += \
        -D ARM_MATH_CM7=true                               \
+       -D __FPU_PRESENT=1                                  \
        -D BOARD=$(BOARD)                                  \
        -D printf=iprintf                                  \
        -D scanf=iscanf
