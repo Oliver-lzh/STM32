@@ -121,6 +121,7 @@ static void Board_dataCallback(void *arg, uint8_t *payload, uint32_t count, uint
     LedSequence_setStatus(LED_STATUS_TRANSFERRING);
 
     AppRadarProbe_onFrame(payload, count, channel, timestamp);
+    AppRadarDebugAcquisition_onFrame(count, channel, timestamp);
 
     /* Range FFT processing is deferred to Board_run() to keep this callback short. */
     if (BoardOutput_getMode() == BOARD_OUTPUT_MODE_DEBUG_TEXT)

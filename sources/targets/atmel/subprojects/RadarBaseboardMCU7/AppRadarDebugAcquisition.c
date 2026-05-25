@@ -15,6 +15,24 @@
 #define APP_RADAR_DEBUG_ACQUISITION_FIFO_ADDRESS      (0x0060u)
 #define APP_RADAR_DEBUG_ACQUISITION_READOUT_SAMPLES \
     (APP_RADAR_DEBUG_ACQUISITION_SAMPLES_PER_CHIRP * APP_RADAR_DEBUG_ACQUISITION_RX_CHANNELS)
+#define APP_RADAR_DEBUG_ACQUISITION_STATUS_INTERVAL_FRAMES (16u)
+#define APP_RADAR_DEBUG_ACQUISITION_EXPECTED_FRAME_BYTES \
+    (APP_RADAR_DEBUG_ACQUISITION_READOUT_SAMPLES * 3u / 2u * APP_RADAR_DEBUG_ACQUISITION_CHIRPS_PER_FRAME)
+#define APP_RADAR_DEBUG_ACQUISITION_VERBOSE (0)
+#define APP_RADAR_DEBUG_ACQUISITION_LOG(...)                         \
+    do                                                               \
+    {                                                                \
+        if (APP_RADAR_DEBUG_ACQUISITION_VERBOSE)                     \
+        {                                                            \
+            (void)BoardOutput_printf(__VA_ARGS__);                   \
+        }                                                            \
+    } while (0)
+
+typedef struct
+{
+    uint8_t address;
+    uint32_t value;
+} AppRadarDebugAcquisition_Register_t;
 
 static const uint32_t g_classicProfileWords[] = {
     0x11e8270u, 0x30a0210u, 0x9e967fdu, 0xb0805b4u,
@@ -35,32 +53,91 @@ static uint8_t m_dataIndex = 0u;
 static bool m_isConstructed = false;
 static bool m_startAttempted = false;
 static bool m_isRunning = false;
+static bool m_hasReceivedFrame = false;
+static bool m_profileVerified = false;
+static uint32_t m_receivedFrameCounter = 0u;
+
+static AppRadarDebugAcquisition_Register_t AppRadarDebugAcquisition_decodeRegisterWord(uint32_t word)
+{
+    AppRadarDebugAcquisition_Register_t reg;
+
+    reg.address = (uint8_t)((word & 0xFE000000u) >> 25);
+    reg.value   = word & 0x00FFFFFFu;
+
+    return reg;
+}
+
+static sr_t AppRadarDebugAcquisition_getRegisters(IRegisters8_32 **registers)
+{
+    if ((m_radar == NULL) || (m_radar->getIRegisters == NULL) || (registers == NULL))
+    {
+        return E_NOT_INITIALIZED;
+    }
+
+    *registers = m_radar->getIRegisters(m_radar);
+    if (*registers == NULL)
+    {
+        return E_NOT_INITIALIZED;
+    }
+
+    return E_SUCCESS;
+}
+
+static sr_t AppRadarDebugAcquisition_verifyClassicProfile(void)
+{
+    uint32_t index;
+    IRegisters8_32 *registers;
+
+    RETURN_ON_ERROR(AppRadarDebugAcquisition_getRegisters(&registers));
+
+    for (index = 0u; index < APP_RADAR_DEBUG_ACQUISITION_ARRAY_SIZE(g_classicProfileWords); index++)
+    {
+        uint32_t readValue;
+        const AppRadarDebugAcquisition_Register_t reg = AppRadarDebugAcquisition_decodeRegisterWord(g_classicProfileWords[index]);
+        const sr_t ret = registers->read(registers, reg.address, &readValue);
+
+        if (ret != E_SUCCESS)
+        {
+            (void)BoardOutput_printf("debug-acq,reg-read,failed,i=%lu,a=%02x,ret=%d\r\n",
+                                     (unsigned long)index,
+                                     (unsigned int)reg.address,
+                                     (int)ret);
+            return ret;
+        }
+
+        if (readValue != reg.value)
+        {
+            (void)BoardOutput_printf("debug-acq,reg-verify,failed,i=%lu,a=%02x,w=%06lx,r=%06lx\r\n",
+                                     (unsigned long)index,
+                                     (unsigned int)reg.address,
+                                     (unsigned long)reg.value,
+                                     (unsigned long)readValue);
+            return E_UNEXPECTED_VALUE;
+        }
+    }
+
+    APP_RADAR_DEBUG_ACQUISITION_LOG("debug-acq,profile,verify,ok,count=%lu\r\n",
+                                    (unsigned long)APP_RADAR_DEBUG_ACQUISITION_ARRAY_SIZE(g_classicProfileWords));
+    m_profileVerified = true;
+    return E_SUCCESS;
+}
 
 static sr_t AppRadarDebugAcquisition_writeClassicProfile(void)
 {
     uint32_t index;
     IRegisters8_32 *registers;
 
-    if ((m_radar == NULL) || (m_radar->getIRegisters == NULL))
-    {
-        return E_NOT_INITIALIZED;
-    }
-
-    registers = m_radar->getIRegisters(m_radar);
-    if (registers == NULL)
-    {
-        return E_NOT_INITIALIZED;
-    }
+    RETURN_ON_ERROR(AppRadarDebugAcquisition_getRegisters(&registers));
 
     for (index = 0u; index < APP_RADAR_DEBUG_ACQUISITION_ARRAY_SIZE(g_classicProfileWords); index++)
     {
-        const uint32_t word = g_classicProfileWords[index];
-        const uint8_t address = (uint8_t)((word & 0xFE000000u) >> 25);
-        const uint32_t value = word & 0x00FFFFFFu;
+        const AppRadarDebugAcquisition_Register_t reg = AppRadarDebugAcquisition_decodeRegisterWord(g_classicProfileWords[index]);
 
-        RETURN_ON_ERROR(registers->write(registers, address, value));
+        RETURN_ON_ERROR(registers->write(registers, reg.address, reg.value));
     }
 
+    APP_RADAR_DEBUG_ACQUISITION_LOG("debug-acq,profile,write,ok,count=%lu\r\n",
+                                    (unsigned long)APP_RADAR_DEBUG_ACQUISITION_ARRAY_SIZE(g_classicProfileWords));
     return E_SUCCESS;
 }
 
@@ -89,6 +166,13 @@ static sr_t AppRadarDebugAcquisition_configureData(void)
                                     (uint16_t)APP_RADAR_DEBUG_ACQUISITION_ARRAY_SIZE(readouts),
                                     APP_RADAR_DEBUG_ACQUISITION_CHIRPS_PER_FRAME);
 
+    APP_RADAR_DEBUG_ACQUISITION_LOG("debug-acq,data,request,fifo=%04x,samples=%u,rx=%u,chirps=%u,fmt=packed12,expect=%lu\r\n",
+                                    (unsigned int)APP_RADAR_DEBUG_ACQUISITION_FIFO_ADDRESS,
+                                    (unsigned int)APP_RADAR_DEBUG_ACQUISITION_SAMPLES_PER_CHIRP,
+                                    (unsigned int)APP_RADAR_DEBUG_ACQUISITION_RX_CHANNELS,
+                                    (unsigned int)APP_RADAR_DEBUG_ACQUISITION_CHIRPS_PER_FRAME,
+                                    (unsigned long)APP_RADAR_DEBUG_ACQUISITION_EXPECTED_FRAME_BYTES);
+
     return m_data->configure(m_dataIndex, &properties, settings, (uint16_t)sizeof(settings));
 }
 
@@ -99,22 +183,26 @@ static sr_t AppRadarDebugAcquisition_start(void)
         return E_NOT_INITIALIZED;
     }
 
-    (void)BoardOutput_printf("debug-acq,config,start\r\n");
+    APP_RADAR_DEBUG_ACQUISITION_LOG("debug-acq,config,start\r\n");
 
     RETURN_ON_ERROR(m_radar->stopData(m_radar));
 
+    m_profileVerified = false;
     RETURN_ON_ERROR(AppRadarDebugAcquisition_writeClassicProfile());
-    (void)BoardOutput_printf("debug-acq,profile,ok\r\n");
+    RETURN_ON_ERROR(AppRadarDebugAcquisition_verifyClassicProfile());
 
     RETURN_ON_ERROR(m_radar->initialize(m_radar));
+    APP_RADAR_DEBUG_ACQUISITION_LOG("debug-acq,radar-init,ok\r\n");
 
     RETURN_ON_ERROR(AppRadarDebugAcquisition_configureData());
-    (void)BoardOutput_printf("debug-acq,data-config,ok\r\n");
+    APP_RADAR_DEBUG_ACQUISITION_LOG("debug-acq,data-config,ok\r\n");
 
     RETURN_ON_ERROR(m_radar->startData(m_radar));
 
     m_isRunning = true;
-    (void)BoardOutput_printf("debug-acq,start,ok\r\n");
+    m_hasReceivedFrame = false;
+    m_receivedFrameCounter = 0u;
+    APP_RADAR_DEBUG_ACQUISITION_LOG("debug-acq,start,ok\r\n");
     return E_SUCCESS;
 }
 
@@ -126,6 +214,9 @@ void AppRadarDebugAcquisition_Constructor(IRadarAvian *radar, IData *data, uint8
     m_isConstructed = true;
     m_startAttempted = false;
     m_isRunning = false;
+    m_hasReceivedFrame = false;
+    m_profileVerified = false;
+    m_receivedFrameCounter = 0u;
 }
 
 void AppRadarDebugAcquisition_run(void)
@@ -156,6 +247,37 @@ void AppRadarDebugAcquisition_run(void)
     }
 }
 
+void AppRadarDebugAcquisition_onFrame(uint32_t count, uint8_t channel, uint64_t timestamp)
+{
+    if (!m_isRunning)
+    {
+        return;
+    }
+
+    m_receivedFrameCounter++;
+
+    if (!m_hasReceivedFrame)
+    {
+        m_hasReceivedFrame = true;
+        APP_RADAR_DEBUG_ACQUISITION_LOG("debug-acq,frame,ok,cnt=%lu,ch=%u,ts=%08lx%08lx\r\n",
+                                        (unsigned long)count,
+                                        (unsigned int)channel,
+                                        (unsigned long)(timestamp >> 32),
+                                        (unsigned long)(timestamp & 0xFFFFFFFFu));
+    }
+
+    if ((m_receivedFrameCounter == 1u) ||
+        ((m_receivedFrameCounter % APP_RADAR_DEBUG_ACQUISITION_STATUS_INTERVAL_FRAMES) == 0u))
+    {
+        APP_RADAR_DEBUG_ACQUISITION_LOG("debug-acq,status,profile=%s,running=%u,frames=%lu,cnt=%lu,expect=%lu\r\n",
+                                        m_profileVerified ? "verified" : "not-verified",
+                                        (unsigned int)m_isRunning,
+                                        (unsigned long)m_receivedFrameCounter,
+                                        (unsigned long)count,
+                                        (unsigned long)APP_RADAR_DEBUG_ACQUISITION_EXPECTED_FRAME_BYTES);
+    }
+}
+
 sr_t AppRadarDebugAcquisition_stop(void)
 {
     sr_t ret;
@@ -164,6 +286,9 @@ sr_t AppRadarDebugAcquisition_stop(void)
     {
         m_isRunning = false;
         m_startAttempted = false;
+        m_hasReceivedFrame = false;
+        m_profileVerified = false;
+        m_receivedFrameCounter = 0u;
         return E_SUCCESS;
     }
 
@@ -177,6 +302,9 @@ sr_t AppRadarDebugAcquisition_stop(void)
     {
         m_isRunning = false;
         m_startAttempted = false;
+        m_hasReceivedFrame = false;
+        m_profileVerified = false;
+        m_receivedFrameCounter = 0u;
     }
 
     return ret;
