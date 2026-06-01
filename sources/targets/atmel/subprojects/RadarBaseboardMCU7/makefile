@@ -57,7 +57,7 @@ include ../../target_platform/makelist.mk
 C_FILES := $(subst ../,,$(C_FILES))
 
 
-C_FILES += $(wildcard *.c)
+C_FILES += $(filter-out copy_fft.c,$(wildcard *.c))
 
 INCLUDE_DIRS += .
 

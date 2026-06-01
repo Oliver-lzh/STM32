@@ -40,11 +40,15 @@
 #define APP_RADAR_PROBE_FIRST_PRINT_COUNT           (4u)
 #define APP_RADAR_PROBE_PRINT_INTERVAL              (16u)
 #define APP_RADAR_PROBE_HEAD_BYTE_COUNT             (8u)
+#define APP_RADAR_PROBE_ENABLE_OUTPUT               (0u)
 
+#if APP_RADAR_PROBE_ENABLE_OUTPUT
 static uint32_t m_frameCounter = 0u;
 static uint64_t m_lastTimestamp = 0u;
 static bool m_hasLastTimestamp = false;
+#endif
 
+#if APP_RADAR_PROBE_ENABLE_OUTPUT
 static const char *AppRadarProbe_classifyCount(uint32_t count)
 {
     if (count == APP_RADAR_PROBE_PACKED12_FRAME_SIZE)
@@ -79,9 +83,11 @@ static bool AppRadarProbe_shouldPrint(uint32_t frameCounter)
 
     return ((frameCounter % APP_RADAR_PROBE_PRINT_INTERVAL) == 0u);
 }
+#endif
 
 void AppRadarProbe_onFrame(const uint8_t *payload, uint32_t count, uint8_t channel, uint64_t timestamp)
 {
+#if APP_RADAR_PROBE_ENABLE_OUTPUT
     uint64_t dt = 0u;
     uint8_t head[APP_RADAR_PROBE_HEAD_BYTE_COUNT] = {0u};
 
@@ -126,4 +132,10 @@ void AppRadarProbe_onFrame(const uint8_t *payload, uint32_t count, uint8_t chann
                              (unsigned int)head[5],
                              (unsigned int)head[6],
                              (unsigned int)head[7]);
+#else
+    (void)payload;
+    (void)count;
+    (void)channel;
+    (void)timestamp;
+#endif
 }

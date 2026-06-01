@@ -34,10 +34,14 @@
 */
 
 #include <board/Board.h>
+#include <fpu/fpu.h>
 
 
 int main(void)
 {
+    /* AppVitalSigns uses floating-point phase math, so enable the Cortex-M7 FPU before board code can run it. */
+    fpu_enable();
+
     /* Run board specific initialization that has to be executed at startup only once */
     Board_Constructor();
 
