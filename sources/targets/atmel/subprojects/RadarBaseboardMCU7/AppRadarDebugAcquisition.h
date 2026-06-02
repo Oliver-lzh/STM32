@@ -9,6 +9,7 @@
 
 void AppRadarDebugAcquisition_Constructor(IRadarAvian *radar, IData *data, uint8_t dataIndex);
 void AppRadarDebugAcquisition_run(void);
+void AppRadarDebugAcquisition_onFrame(uint32_t count, uint8_t channel, uint64_t timestamp);
 sr_t AppRadarDebugAcquisition_stop(void);
 bool AppRadarDebugAcquisition_isRunning(void);
 

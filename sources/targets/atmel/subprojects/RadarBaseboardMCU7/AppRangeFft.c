@@ -1,164 +1,475 @@
-/* ===========================================================================
-** Copyright (C) 2021 Infineon Technologies AG
-**
-** Redistribution and use in source and binary forms, with or without
-** modification, are permitted provided that the following conditions are met:
-**
-** 1. Redistributions of source code must retain the above copyright notice,
-**    this list of conditions and the following disclaimer.
-** 2. Redistributions in binary form must reproduce the above copyright
-**    notice, this list of conditions and the following disclaimer in the
-**    documentation and/or other materials provided with the distribution.
-** 3. Neither the name of the copyright holder nor the names of its
-**    contributors may be used to endorse or promote products derived from
-**    this software without specific prior written permission.
-**
-** THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-** AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-** IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
-** ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
-** LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
-** CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
-** SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
-** INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
-** CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
-** ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
-** POSSIBILITY OF SUCH DAMAGE.
-** ===========================================================================
-*/
 
 #include "AppRangeFft.h"
 #include "BoardOutput.h"
 
+#include <arm_math.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 
-#define APP_RANGE_FFT_SAMPLES_PER_CHIRP     (64u)
-#define APP_RANGE_FFT_RX_CHANNELS           (3u)
-#define APP_RANGE_FFT_CHIRPS_PER_FRAME      (128u)
-#define APP_RANGE_FFT_RX_TO_PROCESS         (0u)
+#define APP_RANGE_FFT_FFT_SIZE              (64u)
+#define APP_RANGE_FFT_SAMPLES_PER_CHIRP     APP_RANGE_FFT_ADC_SAMPLES_PER_CHIRP
+#define APP_RANGE_FFT_RX_CHANNELS           APP_RANGE_FFT_ADC_RX_CHANNELS
+#define APP_RANGE_FFT_CHIRPS_PER_FRAME      APP_RANGE_FFT_ADC_CHIRPS_PER_FRAME
+#define APP_RANGE_FFT_RX_TO_PROCESS         (1u)
 #define APP_RANGE_FFT_CHIRP_SAMPLE_COUNT    (APP_RANGE_FFT_SAMPLES_PER_CHIRP * APP_RANGE_FFT_RX_CHANNELS)
 #define APP_RANGE_FFT_FRAME_SAMPLE_COUNT    (APP_RANGE_FFT_CHIRPS_PER_FRAME * APP_RANGE_FFT_CHIRP_SAMPLE_COUNT)
 #define APP_RANGE_FFT_FRAME_BYTE_COUNT      ((APP_RANGE_FFT_FRAME_SAMPLE_COUNT * 3u) / 2u)
-#define APP_RANGE_FFT_CHIRP_BYTE_COUNT      ((APP_RANGE_FFT_SAMPLES_PER_CHIRP * 3u) / 2u)
+#define APP_RANGE_FFT_CHIRP_BYTE_COUNT      ((APP_RANGE_FFT_CHIRP_SAMPLE_COUNT * 3u) / 2u)
 #define APP_RANGE_FFT_DEBUG_RATE_DIVISOR    (16u)
+#define APP_RANGE_FFT_RAW_RATE_DIVISOR      (64u)
 #define APP_RANGE_FFT_INIT_DELAY_FRAMES     (8u)
-#define APP_RANGE_FFT_SEARCH_START_BIN      (2u)
-#define APP_RANGE_FFT_SEARCH_END_BIN        ((APP_RANGE_FFT_SAMPLES_PER_CHIRP / 2u) - 1u)
-#define APP_RANGE_FFT_MAG_LOG_SHIFT         (14u)
-#define APP_RANGE_FFT_SAMPLE_SCALE_SHIFT    (4u)
+#define APP_RANGE_FFT_MATRIX_BIN_COUNT      (APP_RANGE_FFT_FFT_SIZE / 2u)
+#define APP_RANGE_FFT_VOTE_CHIRP_COUNT      (10u)
+#define APP_RANGE_FFT_SEARCH_START_BIN      (6u)
+#define APP_RANGE_FFT_SEARCH_END_BIN        ((APP_RANGE_FFT_FFT_SIZE / 2u) - 1u)
+#define APP_RANGE_FFT_TOP_BIN_COUNT         (3u)
+#define APP_RANGE_FFT_STABLE_BIN_TOLERANCE  (2u)
+#define APP_RANGE_FFT_RELOCK_FRAME_COUNT    (4u)
+#define APP_RANGE_FFT_RELOCK_MIN_VOTES      (7u)
+#define APP_RANGE_FFT_CLIP_LOW_THRESHOLD    (16u)
+#define APP_RANGE_FFT_CLIP_HIGH_THRESHOLD   (4079u)
+#define APP_RANGE_FFT_PRINT_RAW_CHIRP_ONLY  (0u)
+#define APP_RANGE_FFT_RAW_PRINT_CHUNK_SIZE  (8u)
+#define APP_RANGE_FFT_ENABLE_RAW_OUTPUT     (0u)
+#define APP_RANGE_FFT_ENABLE_FFT_OUTPUT     (0u)
 
-static const int16_t g_cosQ15[APP_RANGE_FFT_SAMPLES_PER_CHIRP] = {
-     32767,  32609,  32137,  31356,  30273,  28898,  27245,  25329,
-     23170,  20787,  18204,  15446,  12539,   9512,   6393,   3212,
-         0,  -3212,  -6393,  -9512, -12539, -15446, -18204, -20787,
-    -23170, -25329, -27245, -28898, -30273, -31356, -32137, -32609,
-    -32767, -32609, -32137, -31356, -30273, -28898, -27245, -25329,
-    -23170, -20787, -18204, -15446, -12539,  -9512,  -6393,  -3212,
-         0,   3212,   6393,   9512,  12539,  15446,  18204,  20787,
-     23170,  25329,  27245,  28898,  30273,  31356,  32137,  32609
+static const q15_t g_blackmanQ15[APP_RANGE_FFT_FFT_SIZE] = {
+      0,    29,   119,   272,   495,   796,  1183,  1667,
+   2257,  2964,  3795,  4758,  5855,  7088,  8454,  9946,
+  11552, 13259, 15046, 16890, 18766, 20643, 22491, 24277,
+  25968, 27532, 28938, 30158, 31166, 31941, 32468, 32734,
+  32734, 32468, 31941, 31166, 30158, 28938, 27532, 25968,
+  24277, 22491, 20643, 18766, 16890, 15046, 13259, 11552,
+   9946,  8454,  7088,  5855,  4758,  3795,  2964,  2257,
+  1667,  1183,   796,   495,   272,   119,    29,     0
 };
 
-static const int16_t g_sinQ15[APP_RANGE_FFT_SAMPLES_PER_CHIRP] = {
-         0,   3212,   6393,   9512,  12539,  15446,  18204,  20787,
-     23170,  25329,  27245,  28898,  30273,  31356,  32137,  32609,
-     32767,  32609,  32137,  31356,  30273,  28898,  27245,  25329,
-     23170,  20787,  18204,  15446,  12539,   9512,   6393,   3212,
-         0,  -3212,  -6393,  -9512, -12539, -15446, -18204, -20787,
-    -23170, -25329, -27245, -28898, -30273, -31356, -32137, -32609,
-    -32767, -32609, -32137, -31356, -30273, -28898, -27245, -25329,
-    -23170, -20787, -18204, -15446, -12539,  -9512,  -6393,  -3212
-};
+typedef struct
+{
+    q15_t real;
+    q15_t imag;
+} AppRangeFft_ComplexQ15_t;
 
 static uint32_t m_frameCounter = 0u;
+static bool m_initialized = false;
+static bool m_initFailed = false;
 static bool m_pendingFrame = false;
-static uint8_t m_pendingPacked12[APP_RANGE_FFT_CHIRP_BYTE_COUNT];
+static uint8_t m_pendingFramePacked12[APP_RANGE_FFT_FRAME_BYTE_COUNT];
 static uint8_t m_pendingChannel = 0u;
 static uint64_t m_pendingTimestamp = 0u;
+static AppRangeFft_AdcCube_t m_adcCube;
 
-static uint16_t unpack_packed12_sample(const uint8_t *packed, uint32_t sampleIndex)
+static arm_cfft_radix2_instance_q15 m_fftInstance;
+static q15_t m_fftBuffer[APP_RANGE_FFT_FFT_SIZE * 2u];
+static AppRangeFft_ComplexQ15_t m_rangeFftMatrix[APP_RANGE_FFT_CHIRPS_PER_FRAME][APP_RANGE_FFT_MATRIX_BIN_COUNT];
+static AppRangeFft_Result_t m_latestResult;
+static bool m_stableBinValid = false;
+static uint32_t m_stableBin = APP_RANGE_FFT_SEARCH_START_BIN;
+static uint32_t m_relockCandidateBin = APP_RANGE_FFT_SEARCH_START_BIN;
+static uint32_t m_relockCandidateFrames = 0u;
+
+static uint16_t unpack_fifo_word_high12(const uint8_t *word)
 {
-    const uint32_t byteIndex = (sampleIndex * 3u) >> 1;
-
-    if ((sampleIndex & 1u) == 0u)
-    {
-        return (uint16_t)packed[byteIndex] | ((uint16_t)(packed[byteIndex + 1u] >> 4) << 8);
-    }
-
-    return (uint16_t)(packed[byteIndex] & 0x0Fu) | ((uint16_t)packed[byteIndex + 1u] << 4);
+                        //左移4位获取高8位         //右移4位获取低4位
+    return (uint16_t)(((uint16_t)word[0] << 4) | ((uint16_t)word[1] >> 4));
 }
 
-static uint64_t abs_i64(int64_t value)
+static uint16_t unpack_fifo_word_low12(const uint8_t *word)
+{                           //保留word1的低四位  拼接word2
+    return (uint16_t)((((uint16_t)word[1] & 0x0Fu) << 8) | (uint16_t)word[2]);
+}
+
+static int32_t abs_i32(int32_t value)
 {
     if (value < 0)
     {
-        return (uint64_t)(-value);
+        return -value;
     }
 
-    return (uint64_t)value;
+    return value;
 }
 
-static uint32_t log2_u64(uint64_t value)
+static q15_t saturate_q15(int32_t value)
 {
-    uint32_t result = 0u;
-
-    while (value > 1u)
+    if (value > 32767)
     {
-        value >>= 1u;
-        result++;
+        return 32767;
     }
 
-    return result;
+    if (value < -32768)
+    {
+        return (q15_t)-32768;
+    }
+
+    return (q15_t)value;
 }
 
-static uint32_t compress_magnitude(uint64_t value)
+static q15_t q15_mul(q15_t left, q15_t right)
 {
-    const uint32_t logMagnitude = log2_u64(value);
-
-    if (logMagnitude <= APP_RANGE_FFT_MAG_LOG_SHIFT)
-    {
-        return 0u;
-    }
-
-    return logMagnitude - APP_RANGE_FFT_MAG_LOG_SHIFT;
+    return saturate_q15(((int32_t)left * (int32_t)right) >> 15);
 }
 
-static uint64_t compute_bin_magnitude(const uint16_t *samples, int32_t mean, uint32_t bin)
+static void clear_latest_result(void)
 {
-    int64_t realSum = 0;
-    int64_t imagSum = 0;
-
-    for (uint32_t sample = 0u; sample < APP_RANGE_FFT_SAMPLES_PER_CHIRP; sample++)
+    m_latestResult.valid = false;
+    m_latestResult.frameIndex = 0u;
+    m_latestResult.rx = APP_RANGE_FFT_RX_TO_PROCESS;
+    m_latestResult.lockedBin = 0u;
+    m_latestResult.voteCount = 0u;
+    m_latestResult.phaseSampleCount = 0u;
+    for (uint32_t index = 0u; index < APP_RANGE_FFT_PHASE_SAMPLE_COUNT; index++)
     {
-        const uint32_t tableIndex = (bin * sample) & (APP_RANGE_FFT_SAMPLES_PER_CHIRP - 1u);
-        const int32_t centered = ((int32_t)samples[sample] - mean) >> APP_RANGE_FFT_SAMPLE_SCALE_SHIFT;
-
-        realSum += (int64_t)centered * (int64_t)g_cosQ15[tableIndex];
-        imagSum -= (int64_t)centered * (int64_t)g_sinQ15[tableIndex];
+        m_latestResult.i[index] = 0;
+        m_latestResult.q[index] = 0;
     }
-
-    return abs_i64(realSum) + abs_i64(imagSum);
+    m_latestResult.iAvg = 0;
+    m_latestResult.qAvg = 0;
 }
 
-static void unpack_chirp(const uint8_t *packed12Data, uint16_t *samples, int32_t *mean)
+static void clear_stable_bin_state(void)
+{
+    m_stableBinValid = false;
+    m_stableBin = APP_RANGE_FFT_SEARCH_START_BIN;
+    m_relockCandidateBin = APP_RANGE_FFT_SEARCH_START_BIN;
+    m_relockCandidateFrames = 0u;
+}
+
+static uint32_t bin_delta(uint32_t left, uint32_t right)
+{
+    return (left > right) ? (left - right) : (right - left);
+}
+
+static uint32_t update_stable_bin(uint32_t peakBin, uint32_t peakVotes)
+{
+    if (!m_stableBinValid)
+    {
+        m_stableBinValid = true;
+        m_stableBin = peakBin;
+        m_relockCandidateBin = peakBin;
+        m_relockCandidateFrames = 0u;
+        return m_stableBin;
+    }
+
+    if (bin_delta(peakBin, m_stableBin) <= APP_RANGE_FFT_STABLE_BIN_TOLERANCE)
+    {
+        m_relockCandidateBin = peakBin;
+        m_relockCandidateFrames = 0u;
+        return m_stableBin;
+    }
+
+    if (peakVotes < APP_RANGE_FFT_RELOCK_MIN_VOTES)
+    {
+        m_relockCandidateBin = peakBin;
+        m_relockCandidateFrames = 0u;
+        return m_stableBin;
+    }
+
+    if (peakBin != m_relockCandidateBin)
+    {
+        m_relockCandidateBin = peakBin;
+        m_relockCandidateFrames = 1u;
+    }
+    else if (m_relockCandidateFrames < APP_RANGE_FFT_RELOCK_FRAME_COUNT)
+    {
+        m_relockCandidateFrames++;
+    }
+
+    if (m_relockCandidateFrames >= APP_RANGE_FFT_RELOCK_FRAME_COUNT)
+    {
+        m_stableBin = peakBin;
+        m_relockCandidateBin = peakBin;
+        m_relockCandidateFrames = 0u;
+    }
+
+    return m_stableBin;
+}
+
+static uint32_t compute_chirp_mean(const AppRangeFft_AdcCube_t adc,
+                                   uint32_t rx,
+                                   uint32_t chirp,
+                                   uint16_t *minSample,
+                                   uint16_t *maxSample,
+                                   uint32_t *clipCount)
 {
     uint32_t sum = 0u;
 
+    *minSample = 4095u;
+    *maxSample = 0u;
+
     for (uint32_t index = 0u; index < APP_RANGE_FFT_SAMPLES_PER_CHIRP; index++)
     {
-        samples[index] = unpack_packed12_sample(packed12Data, index);
-        sum += samples[index];
+        const uint16_t sample = adc[rx][chirp][index];
+
+        if (sample < *minSample)
+        {
+            *minSample = sample;
+        }
+
+        if (sample > *maxSample)
+        {
+            *maxSample = sample;
+        }
+
+        if ((sample <= APP_RANGE_FFT_CLIP_LOW_THRESHOLD) || (sample >= APP_RANGE_FFT_CLIP_HIGH_THRESHOLD))
+        {
+            (*clipCount)++;
+        }
+
+        sum += sample;
     }
 
-    *mean = (int32_t)(sum / APP_RANGE_FFT_SAMPLES_PER_CHIRP);
+    return sum / APP_RANGE_FFT_SAMPLES_PER_CHIRP;
+}
+
+static void prepare_fft_input(const AppRangeFft_AdcCube_t adc, uint32_t rx, uint32_t chirp, uint32_t mean)
+{
+    for (uint32_t index = 0u; index < APP_RANGE_FFT_SAMPLES_PER_CHIRP; index++)
+    {
+        const uint16_t rawSample = adc[rx][chirp][index];
+        const int32_t centered = (int32_t)rawSample - (int32_t)mean;
+        const q15_t q15Sample = saturate_q15(centered << 4);
+        const q15_t windowedSample = q15_mul(q15Sample, g_blackmanQ15[index]);
+
+        m_fftBuffer[2u * index] = windowedSample;
+        m_fftBuffer[(2u * index) + 1u] = 0;
+    }
+}
+
+static uint64_t get_matrix_bin_magnitude(uint32_t chirp, uint32_t bin)
+{
+    const int32_t realValue = m_rangeFftMatrix[chirp][bin].real;
+    const int32_t imagValue = m_rangeFftMatrix[chirp][bin].imag;
+
+    return (uint64_t)abs_i32(realValue) + (uint64_t)abs_i32(imagValue);
+}
+
+static void process_chirp_fft(const AppRangeFft_AdcCube_t adc,
+                              uint32_t rx,
+                              uint32_t chirp,
+                              uint16_t *rawMin,
+                              uint16_t *rawMax,
+                              uint32_t *rawMean,
+                              uint32_t *clipCount)
+{
+    uint16_t minSample;
+    uint16_t maxSample;
+    const uint32_t mean = compute_chirp_mean(adc, rx, chirp, &minSample, &maxSample, clipCount);
+
+    prepare_fft_input(adc, rx, chirp, mean);
+    arm_cfft_radix2_q15(&m_fftInstance, m_fftBuffer);
+
+    for (uint32_t bin = 0u; bin < APP_RANGE_FFT_MATRIX_BIN_COUNT; bin++)
+    {
+        m_rangeFftMatrix[chirp][bin].real = m_fftBuffer[2u * bin];
+        m_rangeFftMatrix[chirp][bin].imag = m_fftBuffer[(2u * bin) + 1u];
+    }
+
+    if (minSample < *rawMin)
+    {
+        *rawMin = minSample;
+    }
+
+    if (maxSample > *rawMax)
+    {
+        *rawMax = maxSample;
+    }
+
+    *rawMean += mean;
+}
+
+static void update_top_vote_bins(uint32_t bin, uint32_t votes, uint64_t energy, uint32_t *topBins, uint32_t *topVotes, uint64_t *topEnergies)
+{
+    for (uint32_t rank = 0u; rank < APP_RANGE_FFT_TOP_BIN_COUNT; rank++)
+    {
+        if ((votes > topVotes[rank]) || ((votes == topVotes[rank]) && (energy > topEnergies[rank])))
+        {
+            for (uint32_t move = APP_RANGE_FFT_TOP_BIN_COUNT - 1u; move > rank; move--)
+            {
+                topBins[move] = topBins[move - 1u];
+                topVotes[move] = topVotes[move - 1u];
+                topEnergies[move] = topEnergies[move - 1u];
+            }
+
+            topBins[rank] = bin;
+            topVotes[rank] = votes;
+            topEnergies[rank] = energy;
+            break;
+        }
+    }
+}
+
+static uint32_t find_chirp_peak_bin(uint32_t chirp)
+{
+    uint32_t peakBin = APP_RANGE_FFT_SEARCH_START_BIN;
+    uint64_t peakMagnitude = 0u;
+
+    for (uint32_t bin = APP_RANGE_FFT_SEARCH_START_BIN; bin <= APP_RANGE_FFT_SEARCH_END_BIN; bin++)
+    {
+        const uint64_t magnitude = get_matrix_bin_magnitude(chirp, bin);
+
+        if (magnitude > peakMagnitude)
+        {
+            peakMagnitude = magnitude;
+            peakBin = bin;
+        }
+    }
+
+    return peakBin;
+}
+
+static uint32_t vote_last_chirps(uint32_t *topBins, uint32_t *topVotes, uint64_t *topEnergies)
+{
+    uint32_t votes[APP_RANGE_FFT_MATRIX_BIN_COUNT];
+    uint64_t energies[APP_RANGE_FFT_MATRIX_BIN_COUNT];
+    uint32_t bestBin = APP_RANGE_FFT_SEARCH_START_BIN;
+    uint32_t bestVotes = 0u;
+    uint64_t bestEnergy = 0u;
+    const uint32_t firstVoteChirp = APP_RANGE_FFT_CHIRPS_PER_FRAME - APP_RANGE_FFT_VOTE_CHIRP_COUNT;
+
+    for (uint32_t bin = 0u; bin < APP_RANGE_FFT_MATRIX_BIN_COUNT; bin++)
+    {
+        votes[bin] = 0u;
+        energies[bin] = 0u;
+    }
+
+    for (uint32_t rank = 0u; rank < APP_RANGE_FFT_TOP_BIN_COUNT; rank++)
+    {
+        topBins[rank] = APP_RANGE_FFT_SEARCH_START_BIN;
+        topVotes[rank] = 0u;
+        topEnergies[rank] = 0u;
+    }
+
+    for (uint32_t chirp = firstVoteChirp; chirp < APP_RANGE_FFT_CHIRPS_PER_FRAME; chirp++)
+    {
+        const uint32_t peakBin = find_chirp_peak_bin(chirp);
+
+        votes[peakBin]++;
+        energies[peakBin] += get_matrix_bin_magnitude(chirp, peakBin);
+    }
+
+    for (uint32_t bin = APP_RANGE_FFT_SEARCH_START_BIN; bin <= APP_RANGE_FFT_SEARCH_END_BIN; bin++)
+    {
+        if ((votes[bin] > bestVotes) || ((votes[bin] == bestVotes) && (energies[bin] > bestEnergy)))
+        {
+            bestVotes = votes[bin];
+            bestEnergy = energies[bin];
+            bestBin = bin;
+        }
+
+        update_top_vote_bins(bin, votes[bin], energies[bin], topBins, topVotes, topEnergies);
+    }
+
+    return bestBin;
+}
+
+static uint32_t count_last_chirp_votes_for_bin(uint32_t targetBin)
+{
+    uint32_t votes = 0u;
+    const uint32_t firstVoteChirp = APP_RANGE_FFT_CHIRPS_PER_FRAME - APP_RANGE_FFT_VOTE_CHIRP_COUNT;
+
+    for (uint32_t chirp = firstVoteChirp; chirp < APP_RANGE_FFT_CHIRPS_PER_FRAME; chirp++)
+    {
+        if (find_chirp_peak_bin(chirp) == targetBin)
+        {
+            votes++;
+        }
+    }
+
+    return votes;
+}
+
+static void update_latest_result(uint32_t lockedBin, uint32_t voteCount)
+{
+    m_latestResult.valid = true;
+    m_latestResult.frameIndex = m_frameCounter;
+    m_latestResult.rx = APP_RANGE_FFT_RX_TO_PROCESS;
+    m_latestResult.lockedBin = (uint8_t)lockedBin;
+    m_latestResult.voteCount = (uint8_t)voteCount;
+    m_latestResult.phaseSampleCount = APP_RANGE_FFT_PHASE_SAMPLE_COUNT;
+    for (uint32_t chirp = 0u; chirp < APP_RANGE_FFT_PHASE_SAMPLE_COUNT; chirp++)
+    {
+        m_latestResult.i[chirp] = m_rangeFftMatrix[chirp][lockedBin].real;
+        m_latestResult.q[chirp] = m_rangeFftMatrix[chirp][lockedBin].imag;
+    }
+    m_latestResult.iAvg = m_latestResult.i[APP_RANGE_FFT_PHASE_SAMPLE_COUNT - 1u];
+    m_latestResult.qAvg = m_latestResult.q[APP_RANGE_FFT_PHASE_SAMPLE_COUNT - 1u];
+}
+
+#if APP_RANGE_FFT_PRINT_RAW_CHIRP_ONLY
+static void print_adc_cube_chirp0(const AppRangeFft_AdcCube_t adc)
+{
+    for (uint32_t rx = 0u; rx < APP_RANGE_FFT_RX_CHANNELS; rx++)
+    {
+        for (uint32_t offset = 0u; offset < APP_RANGE_FFT_SAMPLES_PER_CHIRP; offset += APP_RANGE_FFT_RAW_PRINT_CHUNK_SIZE)
+        {
+            (void)BoardOutput_printf("adc64,layout=mode3,rx=%lu,chirp=0,i=%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu\r\n",
+                                     (unsigned long)rx,
+                                     (unsigned long)offset,
+                                     (unsigned long)adc[rx][0u][offset + 0u],
+                                     (unsigned long)adc[rx][0u][offset + 1u],
+                                     (unsigned long)adc[rx][0u][offset + 2u],
+                                     (unsigned long)adc[rx][0u][offset + 3u],
+                                     (unsigned long)adc[rx][0u][offset + 4u],
+                                     (unsigned long)adc[rx][0u][offset + 5u],
+                                     (unsigned long)adc[rx][0u][offset + 6u],
+                                     (unsigned long)adc[rx][0u][offset + 7u]);
+        }
+    }
+}
+#endif
+
+bool AppRangeFft_convertPayloadToAdcCube(const uint8_t *payload, uint32_t byteCount, AppRangeFft_AdcCube_t adc)
+{
+    if ((payload == NULL) || (adc == NULL) || (byteCount < APP_RANGE_FFT_FRAME_BYTE_COUNT))
+    {
+        return false;
+    }
+
+    for (uint32_t chirp = 0u; chirp < APP_RANGE_FFT_CHIRPS_PER_FRAME; chirp++)//按照chirp遍历
+    {
+        const uint32_t chirpByteOffset = chirp * APP_RANGE_FFT_CHIRP_BYTE_COUNT;//计算当前chirp的启示的字节到结束的字节 首个chirp（3通道）有299bytes
+        //这里是由于3通道采集的模式，所以每次处理9个数据刚好是每个通道的2个sample，后面的数据可以同样循环处理
+        for (uint32_t sample = 0u; sample < APP_RANGE_FFT_SAMPLES_PER_CHIRP; sample += 2u)
+        {
+            //计算偏移多少个字节根据sample数
+            const uint32_t wordOffset = chirpByteOffset + ((sample / 2u) * 9u);
+            const uint8_t *word0 = &payload[wordOffset + 0u];
+            const uint8_t *word1 = &payload[wordOffset + 3u];
+            const uint8_t *word2 = &payload[wordOffset + 6u];
+
+            adc[0u][chirp][sample] = unpack_fifo_word_high12(word0);
+            adc[1u][chirp][sample] = unpack_fifo_word_low12(word0);
+            adc[2u][chirp][sample] = unpack_fifo_word_high12(word1);
+            adc[0u][chirp][sample + 1u] = unpack_fifo_word_low12(word1);
+            adc[1u][chirp][sample + 1u] = unpack_fifo_word_high12(word2);
+            adc[2u][chirp][sample + 1u] = unpack_fifo_word_low12(word2);
+        }
+    }
+
+    return true;
 }
 
 void AppRangeFft_initialize(void)
 {
+    if (m_initialized || m_initFailed)
+    {
+        return;
+    }
+        //初始化arm_cfft_radix2_instance_q15 fft相关的结构体
+    if (arm_cfft_radix2_init_q15(&m_fftInstance, APP_RANGE_FFT_FFT_SIZE, 0u, 1u) != ARM_MATH_SUCCESS)
+    {
+        m_initFailed = true;
+        (void)BoardOutput_printf("fft,error=init\r\n");
+        return;
+    }
+
     m_frameCounter = 0u;
     m_pendingFrame = false;
+    clear_latest_result();
+    clear_stable_bin_state();
+    m_initialized = true;
 }
 
 void AppRangeFft_submitFrame(const uint8_t *packed12Data, uint32_t byteCount, uint8_t channel, uint64_t timestamp)
@@ -179,7 +490,7 @@ void AppRangeFft_submitFrame(const uint8_t *packed12Data, uint32_t byteCount, ui
         return;
     }
 
-    memcpy(m_pendingPacked12, packed12Data, APP_RANGE_FFT_CHIRP_BYTE_COUNT);
+    memcpy(m_pendingFramePacked12, packed12Data, APP_RANGE_FFT_FRAME_BYTE_COUNT);
     m_pendingChannel = channel;
     m_pendingTimestamp = timestamp;
     m_pendingFrame = true;
@@ -199,50 +510,112 @@ void AppRangeFft_run(void)
     }
 
     m_pendingFrame = false;
-    AppRangeFft_process(m_pendingPacked12, APP_RANGE_FFT_CHIRP_BYTE_COUNT, m_pendingChannel, m_pendingTimestamp);
+    AppRangeFft_process(m_pendingFramePacked12, APP_RANGE_FFT_FRAME_BYTE_COUNT, m_pendingChannel, m_pendingTimestamp);
 }
+
 
 void AppRangeFft_process(const uint8_t *packed12Data, uint32_t byteCount, uint8_t channel, uint64_t timestamp)
 {
-    uint16_t samples[APP_RANGE_FFT_SAMPLES_PER_CHIRP];
-    int32_t mean = 0;
-    uint32_t peakBin = APP_RANGE_FFT_SEARCH_START_BIN;
-    uint64_t peakMagnitude = 0u;
+    uint16_t rawMin = 4095u;
+    uint16_t rawMax = 0u;
+    uint32_t rawMean = 0u;
+    uint32_t topBins[APP_RANGE_FFT_TOP_BIN_COUNT];
+    uint32_t topVotes[APP_RANGE_FFT_TOP_BIN_COUNT];
+    uint64_t topEnergies[APP_RANGE_FFT_TOP_BIN_COUNT];
+    uint32_t clipCount = 0u;
+    uint32_t peakBin;
+    uint32_t stableBin;
+    uint32_t stableBinVotes;
 
     (void)timestamp;
     (void)channel;
 
-    if ((packed12Data == NULL) || (byteCount < APP_RANGE_FFT_CHIRP_BYTE_COUNT))
+    if (!m_initialized)
+    {
+        AppRangeFft_initialize();
+    }
+
+    if (!m_initialized || (packed12Data == NULL) || (byteCount < APP_RANGE_FFT_FRAME_BYTE_COUNT))
+    {
+        return;
+    }
+
+    if (!AppRangeFft_convertPayloadToAdcCube(packed12Data, byteCount, m_adcCube))
     {
         return;
     }
 
     m_frameCounter++;
-
     if (m_frameCounter < APP_RANGE_FFT_INIT_DELAY_FRAMES)
     {
         return;
     }
 
-    unpack_chirp(packed12Data, samples, &mean);
-
-    for (uint32_t bin = APP_RANGE_FFT_SEARCH_START_BIN; bin <= APP_RANGE_FFT_SEARCH_END_BIN; bin++)
+    for (uint32_t chirp = 0u; chirp < APP_RANGE_FFT_CHIRPS_PER_FRAME; chirp++)
     {
-        const uint64_t magnitude = compute_bin_magnitude(samples, mean, bin);
-
-        if (magnitude > peakMagnitude)
-        {
-            peakMagnitude = magnitude;
-            peakBin = bin;
-        }
+        process_chirp_fft(m_adcCube,
+                          APP_RANGE_FFT_RX_TO_PROCESS,
+                          chirp,
+                          &rawMin,
+                          &rawMax,
+                          &rawMean,
+                          &clipCount);
     }
 
-    if ((m_frameCounter % APP_RANGE_FFT_DEBUG_RATE_DIVISOR) != 1u)
+    if ((APP_RANGE_FFT_ENABLE_RAW_OUTPUT != 0u) &&
+        ((m_frameCounter % APP_RANGE_FFT_RAW_RATE_DIVISOR) == 1u))
+    {
+        const uint16_t head0 = m_adcCube[APP_RANGE_FFT_RX_TO_PROCESS][0u][0u];
+        const uint16_t head1 = m_adcCube[APP_RANGE_FFT_RX_TO_PROCESS][0u][1u];
+        const uint16_t head2 = m_adcCube[APP_RANGE_FFT_RX_TO_PROCESS][0u][2u];
+        const uint16_t head3 = m_adcCube[APP_RANGE_FFT_RX_TO_PROCESS][0u][3u];
+
+        (void)BoardOutput_printf("raw,layout=mode3,rx=%u,chirps=%lu,min=%lu,max=%lu,mean=%lu,clip=%lu,head=%lu,%lu,%lu,%lu\r\n",
+                                 (unsigned int)APP_RANGE_FFT_RX_TO_PROCESS,
+                                 (unsigned long)APP_RANGE_FFT_CHIRPS_PER_FRAME,
+                                 (unsigned long)rawMin,
+                                 (unsigned long)rawMax,
+                                 (unsigned long)(rawMean / APP_RANGE_FFT_CHIRPS_PER_FRAME),
+                                 (unsigned long)clipCount,
+                                 (unsigned long)head0,
+                                 (unsigned long)head1,
+                                 (unsigned long)head2,
+                                 (unsigned long)head3);
+    }
+
+#if APP_RANGE_FFT_PRINT_RAW_CHIRP_ONLY
+    print_adc_cube_chirp0(m_adcCube);
+    return;
+#endif
+
+    peakBin = vote_last_chirps(topBins, topVotes, topEnergies);
+    stableBin = update_stable_bin(peakBin, topVotes[0]);
+    stableBinVotes = count_last_chirp_votes_for_bin(stableBin);
+    update_latest_result(stableBin, stableBinVotes);
+
+    if ((APP_RANGE_FFT_ENABLE_FFT_OUTPUT == 0u) ||
+        ((m_frameCounter % APP_RANGE_FFT_DEBUG_RATE_DIVISOR) != 1u))
     {
         return;
     }
 
-    (void)BoardOutput_printf("fft,bin=%lu,mag=%lu\r\n",
-                             (unsigned long)peakBin,
-                             (unsigned long)compress_magnitude(peakMagnitude));
+    (void)BoardOutput_printf("fft,bin=%lu,rx=%u,vote=%lu/%u,iq=%d,%d,phase_n=%u\r\n",
+                             (unsigned long)stableBin,
+                             (unsigned int)APP_RANGE_FFT_RX_TO_PROCESS,
+                             (unsigned long)stableBinVotes,
+                             (unsigned int)APP_RANGE_FFT_VOTE_CHIRP_COUNT,
+                             (int)m_latestResult.iAvg,
+                             (int)m_latestResult.qAvg,
+                             (unsigned int)m_latestResult.phaseSampleCount);
+}
+
+bool AppRangeFft_getLatestResult(AppRangeFft_Result_t *result)
+{
+    if (result == NULL)
+    {
+        return false;
+    }
+
+    *result = m_latestResult;
+    return m_latestResult.valid;
 }

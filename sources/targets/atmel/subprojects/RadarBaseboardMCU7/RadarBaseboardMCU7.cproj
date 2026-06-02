@@ -4622,6 +4622,12 @@
     <Compile Include="AppRangeFft.h">
       <SubType>compile</SubType>
     </Compile>
+    <Compile Include="AppVitalSigns.c">
+      <SubType>compile</SubType>
+    </Compile>
+    <Compile Include="AppVitalSigns.h">
+      <SubType>compile</SubType>
+    </Compile>
     <Compile Include="BoardOutput.c">
       <SubType>compile</SubType>
     </Compile>

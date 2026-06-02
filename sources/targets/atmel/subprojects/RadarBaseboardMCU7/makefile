@@ -50,14 +50,13 @@ include ../subprojects.mk
 USB_CLASS_TYPE = cdc
 #USB_CLASS_TYPE = vendor
 
-
 include $(MAKE_SYSTEM_PATH)/build/mk_pre.mk
 include ../../target_platform/makelist.mk
 
 C_FILES := $(subst ../,,$(C_FILES))
 
 
-C_FILES += $(wildcard *.c)
+C_FILES += $(filter-out copy_fft.c,$(wildcard *.c))
 
 INCLUDE_DIRS += .
 

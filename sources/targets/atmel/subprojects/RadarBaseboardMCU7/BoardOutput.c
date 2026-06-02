@@ -40,7 +40,7 @@
 #include <string.h>
 #include <udi_cdc.h>
 
-#define BOARD_OUTPUT_PRINTF_BUFFER_SIZE  (160u)
+#define BOARD_OUTPUT_PRINTF_BUFFER_SIZE  (256u)
 #define BOARD_OUTPUT_COMMAND_BUFFER_SIZE (32u)
 #define BOARD_OUTPUT_COMMAND_READ_LIMIT  (8u)
 
@@ -199,12 +199,7 @@ static void BoardOutput_debugRun(void)
 
     if (!m_debugBootPrinted)
     {
-        if ((BoardOutput_debugSendString("boot,board=RadarBaseboardMCU7,mode=debug\r\n") == E_SUCCESS) &&
-            (BoardOutput_debugSendString("probe,expect,classic-packed12=36864\r\n") == E_SUCCESS) &&
-            (BoardOutput_debugSendString("probe,expect,classic-raw16=49152\r\n") == E_SUCCESS) &&
-            (BoardOutput_debugSendString("probe,expect,packed12=18432\r\n") == E_SUCCESS) &&
-            (BoardOutput_debugSendString("probe,expect,raw16=24576\r\n") == E_SUCCESS) &&
-            (BoardOutput_debugSendString("probe,waiting-for-frame\r\n") == E_SUCCESS))
+        if (BoardOutput_debugSendString("boot,board=RadarBaseboardMCU7,mode=debug\r\n") == E_SUCCESS)
         {
             m_debugBootPrinted = true;
         }
